@@ -35,7 +35,10 @@ _SPEC: tuple[tuple[str, str, Any, Optional[Iterable[str]]], ...] = (
     ("revision", "str", None, None),
     ("dtype", "str", "auto", None),
     ("context_length", "int", None, None),
-    ("load_format", "str", "auto", ("auto", "dummy", "safetensors", "pt")),
+    ("load_format", "str", "auto", ("auto", "dummy", "safetensors", "pt", "remote_instance")),
+    # Dynamo routes ModelExpress weight loading on these two; the fake loads no
+    # weights, so they are accepted and recorded only.
+    ("remote_instance_weight_loader_backend", "str", "nccl", ("transfer_engine", "nccl", "modelexpress")),
     ("trust_remote_code", "flag", False, None),
     ("skip_tokenizer_init", "flag", False, None),
     ("is_embedding", "flag", False, None),
@@ -52,6 +55,9 @@ _SPEC: tuple[tuple[str, str, Any, Optional[Iterable[str]]], ...] = (
     # --- parallelism / topology ---
     ("tp_size", "int", 1, None),
     ("dp_size", "int", 1, None),
+    # Dynamo raises this to its --gateway-workers count; gateway mode itself
+    # is unsupported (see managers/multi_tokenizer_mixin.py).
+    ("tokenizer_worker_num", "int", 1, None),
     ("pp_size", "int", 1, None),
     ("ep_size", "int", 1, None),
     ("dcp_size", "int", 1, None),
@@ -104,6 +110,8 @@ _SPEC: tuple[tuple[str, str, Any, Optional[Iterable[str]]], ...] = (
     ("enable_forward_pass_metrics", "flag", False, None),
     ("forward_pass_metrics_ipc_name", "str", None, None),
     ("kv_events_config", "str", None, None),
+    # Honored: no prefix reuse and no BlockStored events, as in SGLang.
+    ("disable_radix_cache", "flag", False, None),
     ("incremental_streaming_output", "flag", False, None),
     ("allow_auto_truncate", "flag", False, None),
     ("constrained_json_whitespace_pattern", "str", None, None),
@@ -291,7 +299,13 @@ def _load_hf_config(model_path: Optional[str]) -> dict:
     try:
         from transformers import AutoConfig
 
-        config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        # Cache only. Dynamo has already fetched config.json by now, so going
+        # to the network can only find nothing -- and huggingface_hub retries
+        # with backoff, turning an unknown repo id into a minutes-long stall
+        # inside Engine() instead of an immediate empty config.
+        config = AutoConfig.from_pretrained(
+            model_path, trust_remote_code=True, local_files_only=True
+        )
         return config.to_dict()
     except Exception:  # noqa: BLE001 - metadata is best-effort for a fake engine
         return {}

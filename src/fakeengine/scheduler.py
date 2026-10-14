@@ -261,6 +261,9 @@ class Scheduler:
             request.cached_tokens = len(request.prompt_ids)
             return self.pool.can_allocate(1)
 
+        if not self.config.prefix_caching:
+            return self.pool.can_allocate(1)
+
         # Acquire rather than merely match: the matched blocks become this
         # request's, shared with whoever else holds them, so the prefix costs
         # no new memory and cannot be evicted while in use.
@@ -288,7 +291,7 @@ class Scheduler:
         announced those blocks. Publishing them again would tell the router two
         workers hold the same prefix when only one computed it.
         """
-        if request.prebuilt:
+        if request.prebuilt or not self.config.prefix_caching:
             return
         hashes = self._hashes_for(request)
         added = self.pool.insert_prefix(hashes, request.blocks[: len(hashes)])

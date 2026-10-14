@@ -298,6 +298,9 @@ class Engine:
         ``results`` to a background drain task.
         """
         await self._ensure_started()
+        self._resolve_routed_dp_rank(
+            kwargs.get("routed_dp_rank"), kwargs.get("data_parallel_rank")
+        )
 
         prompt_ids = _resolve_prompt_ids(input_ids, prompt, self.sim_config.vocab_size)
         params = dict(sampling_params or {})
@@ -312,6 +315,41 @@ class Engine:
             bootstrap_port=bootstrap_port,
             bootstrap_room=bootstrap_room,
         )
+
+    def _resolve_routed_dp_rank(
+        self,
+        routed_dp_rank: Optional[int],
+        data_parallel_rank: Optional[int],
+    ) -> Optional[int]:
+        """SGLang's DP-rank validation, against this worker's ``dp_size``.
+
+        Dynamo reads this off the class (``gateway.GatewayEngine``), so it must
+        exist even though the fake engine runs one rank. Same rules as SGLang:
+        ``data_parallel_rank`` is the deprecated spelling, rank 0 on a single
+        rank is a no-op, and anything out of range is an error rather than a
+        silent reroute.
+        """
+        if data_parallel_rank is not None:
+            import warnings
+
+            warnings.warn(
+                "'data_parallel_rank' is deprecated, use 'routed_dp_rank' instead.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            if routed_dp_rank is None:
+                routed_dp_rank = data_parallel_rank
+
+        if routed_dp_rank is None:
+            return None
+        num_dp_ranks = max(int(getattr(self.server_args, "dp_size", 1) or 1), 1)
+        if num_dp_ranks <= 1 and routed_dp_rank == 0:
+            return None
+        if routed_dp_rank < 0 or routed_dp_rank >= num_dp_ranks:
+            raise ValueError(
+                f"routed_dp_rank={routed_dp_rank} out of range [0, {num_dp_ranks})"
+            )
+        return routed_dp_rank
 
     async def async_encode(self, **kwargs: Any) -> Dict[str, Any]:
         await self._ensure_started()

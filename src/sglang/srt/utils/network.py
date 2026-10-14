@@ -84,8 +84,17 @@ def get_local_ip_auto() -> str:
 
 def get_zmq_socket(context, socket_type, endpoint: str, bind: bool):
     socket_ = context.socket(socket_type)
-    if bind:
-        socket_.bind(endpoint)
-    else:
-        socket_.connect(endpoint)
+    try:
+        if bind:
+            socket_.bind(endpoint)
+        else:
+            socket_.connect(endpoint)
+    except BaseException:
+        # SGLang leaves the socket open here, and an open socket makes the
+        # owning context's term() block forever. On macOS an ipc:// path over
+        # 103 characters fails bind(), so the leak turns a clean error into a
+        # hang (Dynamo's test_metrics_fanout_reaches_sibling_gateways under
+        # pytest's long macOS tmp_path).
+        socket_.close(linger=0)
+        raise
     return socket_
