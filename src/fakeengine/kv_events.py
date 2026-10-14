@@ -63,11 +63,16 @@ class KvEventEmitter:
         token_ids: Sequence[int],
         digests: Sequence[bytes],
         new_indices: Sequence[int],
+        cache_salt: Optional[str] = None,
     ) -> None:
         """Announce newly cached blocks of one sequence.
 
         ``digests`` are the sequence's per-block cumulative hashes and
-        ``new_indices`` selects the ones that were just added. Only a
+        ``new_indices`` selects the ones that were just added. ``cache_salt``
+        goes out on the event, as in SGLang: Dynamo's router reads it as the
+        block's cache namespace and folds it into the prefix key it
+        recomputes from ``token_ids``, so a salted request only matches blocks
+        stored under the same salt. Only a
         contiguous run starting at the lowest new index is published: the
         blocks form a chain, and a gap would leave later blocks parented to an
         id the router never saw.
@@ -107,6 +112,7 @@ class KvEventEmitter:
                 token_ids=tokens,
                 block_size=self.block_size,
                 lora_id=None,
+                cache_salt=cache_salt or None,
             )
         )
 

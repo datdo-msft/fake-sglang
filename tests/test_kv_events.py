@@ -258,3 +258,61 @@ async def test_alternating_prompts_each_publish_once(publishing_engine):
     warm = await subscriber.drain()
     assert [e for e in warm if e["type"] == "BlockStored"] == []
     assert [e for e in warm if e["type"] == "BlockRemoved"] == []
+
+
+async def _generate_salted(engine, prompt, salt, max_new_tokens=2):
+    stream = await engine.async_generate(
+        input_ids=list(prompt),
+        sampling_params={"max_new_tokens": max_new_tokens},
+        stream=True,
+        cache_salt=salt,
+    )
+    async for _ in stream:
+        pass
+
+
+async def test_salted_store_carries_the_salt_and_its_own_ids(publishing_engine):
+    """Same prompt, two tenants: two stores, disjoint ids, each tagged with
+    its salt -- the router must see two caches, not one."""
+    engine, subscriber = publishing_engine
+    prompt = list(range(5000, 5000 + 2 * BLOCK_SIZE))
+    await _generate_salted(engine, prompt, "tenant-a")
+    await _generate_salted(engine, prompt, "tenant-b")
+    stored = [e for e in await subscriber.drain() if e["type"] == "BlockStored"]
+    assert [e.get("cache_salt") for e in stored] == ["tenant-a", "tenant-b"]
+    assert not set(stored[0]["block_hashes"]) & set(stored[1]["block_hashes"])
+    assert stored[0]["token_ids"] == stored[1]["token_ids"] == prompt
+
+
+async def test_unsalted_store_omits_the_salt(publishing_engine):
+    """An empty salt is no salt (SGLang normalizes "" to None), and the field
+    is omitted from the wire rather than sent as an empty namespace."""
+    engine, subscriber = publishing_engine
+    await _generate_salted(engine, range(6000, 6000 + 2 * BLOCK_SIZE), "")
+    [stored] = [e for e in await subscriber.drain() if e["type"] == "BlockStored"]
+    assert "cache_salt" not in stored
+
+
+async def test_salted_tokens_hash_to_the_frontends_salted_key(publishing_engine):
+    """The routing property for tenants: rehashing the published tokens under
+    the published salt reproduces the frontend's key for a request with that
+    salt -- and differs from the unsalted key, so tenants never match each
+    other's prefixes."""
+    from dynamo.llm import compute_block_hash_for_seq
+
+    engine, subscriber = publishing_engine
+    prompt = list(range(7000, 7000 + 3 * BLOCK_SIZE))
+    await _generate_salted(engine, prompt, "tenant-a")
+    [stored] = [e for e in await subscriber.drain() if e["type"] == "BlockStored"]
+
+    salt = stored["cache_salt"]
+    frontend = compute_block_hash_for_seq(prompt, BLOCK_SIZE, cache_namespace="tenant-a")
+    tokens = stored["token_ids"]
+    worker = [
+        compute_block_hash_for_seq(
+            tokens[i * BLOCK_SIZE : (i + 1) * BLOCK_SIZE], BLOCK_SIZE, cache_namespace=salt
+        )[0]
+        for i in range(len(stored["block_hashes"]))
+    ]
+    assert worker == frontend[: len(worker)]
+    assert worker != compute_block_hash_for_seq(prompt, BLOCK_SIZE)[: len(worker)]

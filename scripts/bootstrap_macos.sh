@@ -109,9 +109,34 @@ uv pip install torch pillow
 uv pip install blake3
 
 step "7/7 verify"
+# `cmd && echo OK` is exempt from `set -e` -- a failing check would print its
+# traceback and the script would still announce "Done". Count failures and
+# exit non-zero instead.
+verify_failed=0
+verify() {
+  local label="$1"; shift
+  if "$@" >/dev/null; then
+    echo "$label OK"
+  else
+    echo "!! $label FAILED (see the error above)" >&2
+    verify_failed=1
+  fi
+}
 python -c "import sglang; assert sglang.__is_fake_sglang__; print('sglang shim ->', sglang.__file__)"
-python -m dynamo.frontend --help >/dev/null && echo "dynamo.frontend OK"
-python -m dynamo.sglang --help  >/dev/null && echo "dynamo.sglang OK"
+verify dynamo.frontend python -m dynamo.frontend --help
+verify dynamo.sglang   python -m dynamo.sglang --help
+if [ "$verify_failed" -ne 0 ]; then
+  cat >&2 <<'MSG'
+
+Verification failed. The usual causes, after `git pull` in ../dynamo:
+  * dynamo.frontend: the Rust bindings were rebuilt but still fail to load --
+    re-run this script and check step 5's output.
+  * dynamo.sglang: Dynamo started using SGLang APIs the shim lacks. Run
+      pytest tests/test_shim_contract.py
+    for the exact list of missing names.
+MSG
+  exit 1
+fi
 
 cat <<MSG
 

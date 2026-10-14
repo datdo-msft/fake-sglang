@@ -265,6 +265,31 @@ router's own bookkeeping.
 > A block is published once and never re-announced, so an event lost in that
 > window is not recovered. Restarting the stack clears it.
 
+### Per-tenant cache isolation (`cache_salt`)
+
+A request's `cache_salt` names a cache namespace: only requests with the same
+salt share prefix-cache blocks, as in SGLang. Clients send it as
+`"nvext": {"cache_salt": "tenant-a"}`. The worker seeds its block-hash chain
+with the salt and publishes the salt on each `BlockStored` event. Dynamo's
+router folds that salt into the prefix key it recomputes from the tokens, so
+it builds a separate tree per tenant. An empty salt is no salt.
+
+Measured with two aggregated workers behind the KV router, sending the same
+1,500-word prompt under different salts:
+
+```
+request         overlap_blocks   worker
+tenant-a  1st   0                W1
+tenant-a  2nd   94               W1    <- full hit, same tenant
+tenant-b  1st   0                W2    <- same prompt, other tenant: no hit
+tenant-b  2nd   94               W2
+no salt         0                W2    <- matches neither tenant
+```
+
+`tests/test_kv_events.py` checks that the published tokens, rehashed under
+the published salt with Dynamo's own `compute_block_hash_for_seq`, reproduce
+the frontend's salted key, and that this key differs from the unsalted one.
+
 ## Layout
 
 ```
@@ -287,27 +312,38 @@ touches one side.
 ## Tests
 
 ```bash
-pytest tests/                                                    # 73 tests
-pytest ../dynamo/components/src/dynamo/sglang/tests -m unit      # 556 pass
+pytest tests/                                                    # 82 tests
+pytest ../dynamo/components/src/dynamo/sglang/tests -m unit      # 1006 pass, 7 fail (below)
 ```
 
-`tests/test_shim_contract.py` is the drift guard. It re-derives the contract
-from Dynamo's own source — every `sglang.*` import, every `server_args.<field>`
-and `tokenizer_manager.<attr>` read — and fails by name when Dynamo starts
-using something the shim lacks. It understands Dynamo's `_compat.py` N/N-1
-fallback groups, requiring only that *one* alternative in each group resolves.
+Counts are against Dynamo `2db5333ef6`.
+
+`tests/test_shim_contract.py` is the drift guard. It reads Dynamo's own source
+and fails by name when Dynamo starts using something the shim lacks: every
+`sglang.*` import, every `server_args.<field>` / `parsed_args.<field>`, every
+`tokenizer_manager.<attr>` and `engine.<attr>`, every `sgl.Engine.<attr>` read
+off the class (private names included, since a class-level read breaks import
+of the whole worker), and every `envs.SGLANG_*` field, which must have
+SGLang's type. It understands Dynamo's `_compat.py` N/N-1 fallback groups,
+requiring only that *one* alternative in each group resolves. Groups the shim
+leaves unresolved on purpose are listed in `DELIBERATELY_ABSENT` with a
+reason, and the list fails if it goes stale.
+
+After `git pull` in `../dynamo`, re-run `./scripts/bootstrap_macos.sh`. Its
+verify step fails, and points you at the contract test, if Dynamo has moved
+past the shim.
 
 ### Known gaps
 
-Three of Dynamo's own SGLang tests still fail, none of them core:
+7 of Dynamo's own SGLang unit tests fail. None of them affects running workers:
 
-- `test_video_encode_real`, `test_compat_supports_tensor_image_sizes` —
-  multimodal image/video paths, deliberately stubbed out.
-- `test_cancelled_sync_engine_route_keeps_engine_routes_serialized` — uses
-  `asyncio.timeout`, which is Python 3.11+. Unrelated to the shim; the
-  bootstrap pins 3.10 because `ai-dynamo`'s `aisimulate` dependency is marked
-  `python_version >= '3.11'` and ships only an sdist. Build on 3.12 (Rust is
-  already installed by then) if you need that test.
+| Tests | Cause |
+|---|---|
+| `test_gateway_engine_facade_generates_through_tokenizer_manager` | `--gateway-workers` mode is not supported (see `managers/multi_tokenizer_mixin.py`). |
+| `test_parse_args_rejects_mla_dcp_on_dsa_backend` | Follows from the deliberately absent MLA backend prediction (`DELIBERATELY_ABSENT`). |
+| `test_external_mm_hashes_rebuild_padding_after_hash_override`, `test_sglang_video_output_is_vp9_in_shipped_image` | Multimodal is not simulated; the video test also needs `imageio`. |
+| `test_cancelled_sync_engine_route_keeps_engine_routes_serialized`, `test_disagg_decode_passes_prefill_dp_rank_to_engine` | Python 3.10: `asyncio.timeout` is 3.11+, and `inspect.signature(AsyncMock())` raises on 3.10, so Dynamo drops optional kwargs for mocked engines. The bootstrap pins 3.10 because `ai-dynamo`'s `aisimulate` dependency is 3.11+ and ships only an sdist. Build on 3.12 if you need these. |
+| `test_metrics_fanout_reaches_sibling_gateways` | macOS: pytest's temp dir makes the `ipc://` path longer than the 103-character Unix socket limit. Passes on Linux. |
 
 ## Not simulated yet
 
@@ -316,5 +352,6 @@ Three of Dynamo's own SGLang tests still fail, none of them core:
   scheduler metrics go over the simpler `metrics_ipc_name` socket instead.
 - **Multi-rank KV events.** One DP rank per worker. The per-rank port offset is
   implemented, but nothing drives `dp_size > 1`.
+- **Gateway mode (`--gateway-workers`)**: see Known gaps above.
 - Multimodal, embedding/rerank, diffusion, LoRA, and weight updates — these
   raise a clear `NotImplementedError` rather than pretending.

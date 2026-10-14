@@ -40,7 +40,7 @@ class Request:
     __slots__ = (
         "rid", "prompt_ids", "max_new_tokens", "prebuilt", "first_token",
         "queue", "blocks", "prefilled", "generated", "cached_tokens",
-        "_stream", "_hashes", "finished", "arrival",
+        "_stream", "_hashes", "finished", "arrival", "cache_salt",
     )
 
     def __init__(
@@ -51,8 +51,11 @@ class Request:
         *,
         prebuilt: bool = False,
         first_token: Optional[int] = None,
+        cache_salt: Optional[str] = None,
     ) -> None:
         self.rid = rid
+        # Prefix-cache namespace: only requests with the same salt share KV.
+        self.cache_salt = cache_salt or None
         self.prompt_ids = list(prompt_ids)
         self.max_new_tokens = max(int(max_new_tokens), 1)
         self.prebuilt = prebuilt
@@ -249,7 +252,7 @@ class Scheduler:
     def _hashes_for(self, request: Request) -> List[bytes]:
         if request._hashes is None:                       # noqa: SLF001
             request._hashes = block_hashes(               # noqa: SLF001
-                request.prompt_ids, self.config.block_size
+                request.prompt_ids, self.config.block_size, request.cache_salt
             )
         return request._hashes                            # noqa: SLF001
 
@@ -259,6 +262,9 @@ class Scheduler:
             # KV arrived over the transfer, so from this worker's point of view
             # the whole prompt is already "cached" -- it is never recomputed.
             request.cached_tokens = len(request.prompt_ids)
+            return self.pool.can_allocate(1)
+
+        if not self.config.prefix_caching:
             return self.pool.can_allocate(1)
 
         # Acquire rather than merely match: the matched blocks become this
@@ -288,7 +294,7 @@ class Scheduler:
         announced those blocks. Publishing them again would tell the router two
         workers hold the same prefix when only one computed it.
         """
-        if request.prebuilt:
+        if request.prebuilt or not self.config.prefix_caching:
             return
         hashes = self._hashes_for(request)
         added = self.pool.insert_prefix(hashes, request.blocks[: len(hashes)])
@@ -297,6 +303,7 @@ class Scheduler:
                 token_ids=request.prompt_ids,
                 digests=hashes,
                 new_indices=[index for index, _ in added],
+                cache_salt=request.cache_salt,
             )
 
     def _emit_first_token(self, request: Request) -> None:

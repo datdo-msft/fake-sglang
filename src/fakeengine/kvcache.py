@@ -14,18 +14,40 @@ from collections import OrderedDict
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 
-def block_hashes(token_ids: Sequence[int], block_size: int) -> List[bytes]:
+def namespace_seed(cache_salt: Optional[str]) -> bytes:
+    """Where a salted request's hash chain starts.
+
+    SGLang keys its prefix cache by the request's ``cache_salt`` as well as its
+    tokens, so tenants with different salts never share KV even for an
+    identical prompt. Seeding the chain gives the same property: every block
+    hash of a salted sequence depends on the salt. No salt keeps the empty
+    seed, so unsalted ids are unchanged. The length prefix keeps "a"+"bc" and
+    "ab"+"c" apart, as SGLang's ``kv_event_namespace_seed`` does.
+    """
+    if not cache_salt:
+        return b""
+    encoded = cache_salt.encode("utf-8")
+    return hashlib.blake2b(
+        b"fake-sglang-cache-salt-v1" + len(encoded).to_bytes(8, "little") + encoded,
+        digest_size=16,
+    ).digest()
+
+
+def block_hashes(
+    token_ids: Sequence[int], block_size: int, cache_salt: Optional[str] = None
+) -> List[bytes]:
     """Cumulative (prefix-inclusive) hash per full block.
 
     Cumulative rather than per-block: two prompts sharing a suffix but not a
-    prefix must NOT match, and only a chained hash expresses that.
+    prefix must NOT match, and only a chained hash expresses that. The chain
+    starts from the salt's seed (``namespace_seed``).
 
     Trailing tokens that do not fill a block produce no hash. That is
     deliberate -- a partial block is not a cache entry, and Dynamo drops any
     published block whose token count is not exactly ``block_size``.
     """
     hashes: List[bytes] = []
-    running = b""
+    running = namespace_seed(cache_salt)
     for start in range(0, len(token_ids) - block_size + 1, block_size):
         chunk = token_ids[start : start + block_size]
         running = hashlib.blake2b(

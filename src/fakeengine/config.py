@@ -41,6 +41,7 @@ class SimConfig:
     bootstrap_poll_interval_s: float
     bootstrap_timeout_s: float
 
+    prefix_caching: bool = True
     location: Optional[str] = None
     topology: Optional[Topology] = None
 
@@ -99,6 +100,7 @@ class SimConfig:
             )
             / 1000.0,
             bootstrap_timeout_s=float(server_args.fake_bootstrap_timeout_s),
+            prefix_caching=not bool(getattr(server_args, "disable_radix_cache", False)),
             location=location,
             topology=topology,
         )

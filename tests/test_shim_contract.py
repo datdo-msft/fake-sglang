@@ -102,6 +102,27 @@ def _collect() -> tuple:
     return required, groups
 
 
+# Fallback groups the shim deliberately leaves unresolved. Each is one where
+# Dynamo's ``except ImportError`` sets the name to ``None`` and skips a feature,
+# and skipping is the honest answer for a simulator. A new group still fails
+# the test until it is either provided or added here with a reason.
+DELIBERATELY_ABSENT = {
+    "sglang.srt.arg_groups.model_override_base.get_default_attn_backend":
+        "predicts SGLang's MLA attention backend; the fake has no attention "
+        "backends, and None makes Dynamo skip the DCP backend check",
+    "sglang.srt.configs.model_config.is_deepseek_dsa":
+        "same MLA backend prediction as above",
+    "sglang.srt.observability.req_time_stats.APIServerReqTimeStats":
+        "advertises aborts ordered after scheduler dispatch; the fake does not "
+        "implement that, and None keeps Dynamo's cancel path fail-closed",
+    "sglang.srt.arg_groups.overrides.declare_resolution":
+        "records which source resolved each ServerArgs field; None skips the "
+        "bookkeeping and nothing reads it back",
+    "sglang.srt.multimodal.processors.qwen_vl":
+        "Qwen-VL video sizing constants; multimodal is not simulated",
+}
+
+
 def _resolves(module_name: str, symbol) -> bool:
     try:
         module = importlib.import_module(module_name)
@@ -141,12 +162,17 @@ def test_every_required_import_resolves():
     )
 
 
+def _name(module: str, symbol) -> str:
+    return f"{module}.{symbol}" if symbol else module
+
+
 def test_every_compat_fallback_group_has_a_live_option():
     _, groups = _collect()
     dead = [
-        sorted(f"{m}.{s}" if s else m for m, s in group)
+        sorted(_name(m, s) for m, s in group)
         for group in groups
         if not any(_resolves(m, s) for m, s in group)
+        and not all(_name(m, s) in DELIBERATELY_ABSENT for m, s in group)
     ]
     assert not dead, (
         "Dynamo has try/except import alternatives where the shim satisfies "
@@ -159,9 +185,11 @@ def test_server_args_declares_every_field_dynamo_reads():
 
     server_args = ServerArgs(model_path="stub")
     # Methods and dunders are covered by the symbol test; this is about data.
+    # ``parsed_args`` is the Namespace from ServerArgs.add_cli_args, read before
+    # ServerArgs exists (args.py), so its fields are the same contract.
     missing = sorted(
         name
-        for name in _direct_attributes("server_args")
+        for name in _direct_attributes("server_args") | _direct_attributes("parsed_args")
         if not name.startswith("_") and not hasattr(server_args, name)
     )
     assert not missing, (
@@ -203,3 +231,66 @@ def test_engine_exposes_everything_dynamo_calls():
     assert not missing, "Dynamo calls Engine members the shim lacks:\n  " + "\n  ".join(
         missing
     )
+
+
+def test_deliberately_absent_list_is_current():
+    """An entry Dynamo no longer imports, or one the shim now provides, is a
+    stale decision and should be deleted rather than left to mislead."""
+    _, groups = _collect()
+    guarded = {_name(m, s) for group in groups for m, s in group}
+    stale = sorted(
+        name
+        for name in DELIBERATELY_ABSENT
+        if name not in guarded or _resolves(*name.rsplit(".", 1))
+    )
+    assert not stale, "Stale DELIBERATELY_ABSENT entries:\n  " + "\n  ".join(stale)
+
+
+def test_engine_class_attributes_dynamo_reads_exist():
+    """``sgl.Engine.<name>`` read off the class, private names included.
+
+    Class-level reads run at import time (``gateway.GatewayEngine`` binds
+    ``sgl.Engine._resolve_routed_dp_rank`` in its class body), so one missing
+    attribute stops every worker before it starts -- and the instance check
+    above skips private names, which is how that one got through.
+    """
+    from sglang import Engine
+
+    pattern = re.compile(r"(?<![\w.])(?:sgl|sglang)\.Engine\.([a-zA-Z_][a-zA-Z0-9_]*)")
+    wanted = set()
+    for path in _source_files():
+        wanted.update(pattern.findall(path.read_text()))
+    missing = sorted(name for name in wanted if not hasattr(Engine, name))
+    assert not missing, "Dynamo reads Engine class attributes the shim lacks:\n  " + (
+        "\n  ".join(missing)
+    )
+
+
+def test_env_fields_dynamo_reads_have_sglang_types():
+    """``envs.X.get()`` must return SGLang's type, not the raw string: Dynamo
+    compares them (``envs.SGLANG_MAX_THINK_TOKENS.get() >= 0``)."""
+    from sglang.srt.environ import _TYPED
+
+    pattern = re.compile(r"\benvs\.(SGLANG_[A-Z0-9_]+)")
+    wanted = set()
+    for path in _source_files():
+        wanted.update(pattern.findall(path.read_text()))
+    missing = sorted(wanted - set(_TYPED))
+    assert not missing, (
+        "Dynamo reads SGLang env fields the shim does not type "
+        "(add them to _TYPED in sglang/srt/environ.py):\n  " + "\n  ".join(missing)
+    )
+
+
+def test_dynamo_sees_cache_salt_support():
+    """Dynamo only sends a salt after checking both the native request type
+    and the async_generate signature; either missing makes it refuse salted
+    requests outright."""
+    from dynamo.sglang._compat import cache_salt_kwargs
+    from sglang.srt.entrypoints.engine import Engine
+    from sglang.srt.managers.io_struct import GenerateReqInput
+    from sglang.srt.server_args import ServerArgs
+
+    assert "cache_salt" in GenerateReqInput.__dataclass_fields__
+    engine = Engine(server_args=ServerArgs(model_path="stub"))
+    assert cache_salt_kwargs(engine, "tenant-a") == {"cache_salt": "tenant-a"}

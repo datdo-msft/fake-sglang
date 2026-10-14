@@ -183,6 +183,52 @@ async def test_repeated_prompt_reports_a_prefix_cache_hit(server_args):
     await scheduler.stop()
 
 
+async def test_cache_salt_isolates_the_prefix_cache(server_args):
+    """Only requests with the same salt share KV, as in SGLang: an identical
+    prompt under another salt, or under none, is recomputed."""
+    scheduler = Scheduler(_config(server_args))
+    scheduler.start()
+    prompt = list(range(300, 364))
+
+    async def cached(rid, salt):
+        request = scheduler.submit(Request(rid, prompt, max_new_tokens=2, cache_salt=salt))
+        await _drain(request)
+        return request.cached_tokens
+
+    assert await cached("a1", "tenant-a") == 0
+    assert await cached("a2", "tenant-a") == len(prompt)
+    assert await cached("b1", "tenant-b") == 0
+    assert await cached("n1", None) == 0
+    assert await cached("n2", "") == len(prompt)      # "" is no salt
+    await scheduler.stop()
+
+
+async def test_disable_radix_cache_turns_off_reuse_and_events(server_args):
+    """``--disable-radix-cache``: every prompt is recomputed, and the router is
+    never told a prefix is cached, as in SGLang."""
+
+    class Recorder:
+        def __init__(self):
+            self.stored = []
+
+        def publish_stored(self, **kwargs):
+            self.stored.append(kwargs)
+
+        def publish_removed(self, block_ids):
+            pass
+
+    events = Recorder()
+    scheduler = Scheduler(_config(server_args, disable_radix_cache=True), kv_events=events)
+    scheduler.start()
+    prompt = list(range(100, 164))
+    for rid in ("r1", "r2"):
+        request = scheduler.submit(Request(rid, prompt, max_new_tokens=2))
+        await _drain(request)
+        assert request.cached_tokens == 0
+    assert events.stored == []
+    await scheduler.stop()
+
+
 async def test_batched_requests_all_complete_under_a_running_limit(server_args):
     """Continuous batching must not drop or stall requests past the limit."""
     scheduler = Scheduler(_config(server_args, max_running_requests=2))
