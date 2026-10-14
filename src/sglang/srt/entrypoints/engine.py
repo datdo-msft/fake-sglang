@@ -21,7 +21,7 @@ import asyncio
 import logging
 import time
 import uuid
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional, Union
 
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 from sglang.srt.server_args import PortArgs, ServerArgs
@@ -89,6 +89,7 @@ class TokenizerManager:
             bootstrap_room=getattr(obj, "bootstrap_room", None),
             return_logprob=getattr(obj, "return_logprob", False),
             top_logprobs_num=getattr(obj, "top_logprobs_num", 0),
+            cache_salt=getattr(obj, "cache_salt", None),
         )
         async for chunk in stream:
             yield chunk
@@ -289,6 +290,7 @@ class Engine:
         bootstrap_host: Optional[str] = None,
         bootstrap_port: Optional[int] = None,
         bootstrap_room: Optional[int] = None,
+        cache_salt: Optional[Union[List[str], str]] = None,
         **kwargs: Any,
     ) -> AsyncIterator[dict]:
         """Returns the stream; the caller awaits this, then iterates it.
@@ -314,6 +316,7 @@ class Engine:
             bootstrap_host=bootstrap_host,
             bootstrap_port=bootstrap_port,
             bootstrap_room=bootstrap_room,
+            cache_salt=_single_salt(cache_salt),
         )
 
     def _resolve_routed_dp_rank(
@@ -371,6 +374,7 @@ class Engine:
         bootstrap_host: Optional[str],
         bootstrap_port: Optional[int],
         bootstrap_room: Optional[int],
+        cache_salt: Optional[str] = None,
     ) -> AsyncIterator[dict]:
         mode = self.disaggregation_mode
         started = time.monotonic()
@@ -388,7 +392,7 @@ class Engine:
                 yield chunk
             return
 
-        request = Request(request_id, prompt_ids, max_new_tokens)
+        request = Request(request_id, prompt_ids, max_new_tokens, cache_salt=cache_salt)
         self.scheduler.submit(request)
 
         sender: Optional[KVSender] = None
@@ -499,6 +503,18 @@ class Engine:
         if finish_reason is not None:
             meta["finish_reason"] = {"type": finish_reason, "matched": None}
         return {"text": "", "output_ids": list(output_ids), "meta_info": meta}
+
+
+def _single_salt(cache_salt: Optional[Union[List[str], str]]) -> Optional[str]:
+    """SGLang's ``_normalize_cache_salt`` for the one prompt the fake serves:
+    an empty salt is no salt, and a batch must give strings."""
+    if isinstance(cache_salt, (list, tuple)):
+        if any(not isinstance(value, str) for value in cache_salt):
+            raise ValueError("Every cache_salt should be a string.")
+        cache_salt = cache_salt[0] if cache_salt else None
+    elif cache_salt is not None and not isinstance(cache_salt, str):
+        raise ValueError("cache_salt should be a string.")
+    return cache_salt or None
 
 
 def _advertised_host(server_args: ServerArgs) -> str:

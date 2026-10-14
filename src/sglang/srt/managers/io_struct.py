@@ -95,6 +95,9 @@ class GenerateReqInput(_BatchNormalizationMixin):
     audio_data: Optional[Any] = None
     mm_hashes: Optional[Any] = None
     require_reasoning: bool = False
+    # Prefix-cache namespace. Dynamo checks this field exists before it sends
+    # a salt, and refuses salted requests otherwise.
+    cache_salt: Optional[Union[List[str], str]] = None
     return_routed_experts: bool = False
     routed_experts_start_len: int = -1
     extra_key: Optional[str] = None

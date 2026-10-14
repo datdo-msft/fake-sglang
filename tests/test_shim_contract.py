@@ -280,3 +280,17 @@ def test_env_fields_dynamo_reads_have_sglang_types():
         "Dynamo reads SGLang env fields the shim does not type "
         "(add them to _TYPED in sglang/srt/environ.py):\n  " + "\n  ".join(missing)
     )
+
+
+def test_dynamo_sees_cache_salt_support():
+    """Dynamo only sends a salt after checking both the native request type
+    and the async_generate signature; either missing makes it refuse salted
+    requests outright."""
+    from dynamo.sglang._compat import cache_salt_kwargs
+    from sglang.srt.entrypoints.engine import Engine
+    from sglang.srt.managers.io_struct import GenerateReqInput
+    from sglang.srt.server_args import ServerArgs
+
+    assert "cache_salt" in GenerateReqInput.__dataclass_fields__
+    engine = Engine(server_args=ServerArgs(model_path="stub"))
+    assert cache_salt_kwargs(engine, "tenant-a") == {"cache_salt": "tenant-a"}

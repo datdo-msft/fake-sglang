@@ -265,6 +265,31 @@ router's own bookkeeping.
 > A block is published once and never re-announced, so an event lost in that
 > window is not recovered. Restarting the stack clears it.
 
+### Per-tenant cache isolation (`cache_salt`)
+
+A request's `cache_salt` names a cache namespace: only requests with the same
+salt share prefix-cache blocks, as in SGLang. Clients send it as
+`"nvext": {"cache_salt": "tenant-a"}`. The worker seeds its block-hash chain
+with the salt and publishes the salt on each `BlockStored` event. Dynamo's
+router folds that salt into the prefix key it recomputes from the tokens, so
+it builds a separate tree per tenant. An empty salt is no salt.
+
+Measured with two aggregated workers behind the KV router, sending the same
+1,500-word prompt under different salts:
+
+```
+request         overlap_blocks   worker
+tenant-a  1st   0                W1
+tenant-a  2nd   94               W1    <- full hit, same tenant
+tenant-b  1st   0                W2    <- same prompt, other tenant: no hit
+tenant-b  2nd   94               W2
+no salt         0                W2    <- matches neither tenant
+```
+
+`tests/test_kv_events.py` checks that the published tokens, rehashed under
+the published salt with Dynamo's own `compute_block_hash_for_seq`, reproduce
+the frontend's salted key, and that this key differs from the unsalted one.
+
 ## Layout
 
 ```
@@ -287,8 +312,8 @@ touches one side.
 ## Tests
 
 ```bash
-pytest tests/                                                    # 77 tests
-pytest ../dynamo/components/src/dynamo/sglang/tests -m unit      # 1000 pass, 13 fail (below)
+pytest tests/                                                    # 82 tests
+pytest ../dynamo/components/src/dynamo/sglang/tests -m unit      # 1006 pass, 7 fail (below)
 ```
 
 Counts are against Dynamo `2db5333ef6`.
@@ -310,11 +335,10 @@ past the shim.
 
 ### Known gaps
 
-13 of Dynamo's own SGLang unit tests fail. None of them affects running workers:
+7 of Dynamo's own SGLang unit tests fail. None of them affects running workers:
 
 | Tests | Cause |
 |---|---|
-| 6 `cache_salt` tests | Not implemented. Real SGLang isolates the prefix cache per salt and publishes salted block hashes in KV events. The fake reports no support, so Dynamo rejects salted requests with a clear error instead of silently sharing cache. |
 | `test_gateway_engine_facade_generates_through_tokenizer_manager` | `--gateway-workers` mode is not supported (see `managers/multi_tokenizer_mixin.py`). |
 | `test_parse_args_rejects_mla_dcp_on_dsa_backend` | Follows from the deliberately absent MLA backend prediction (`DELIBERATELY_ABSENT`). |
 | `test_external_mm_hashes_rebuild_padding_after_hash_override`, `test_sglang_video_output_is_vp9_in_shipped_image` | Multimodal is not simulated; the video test also needs `imageio`. |
@@ -328,7 +352,6 @@ past the shim.
   scheduler metrics go over the simpler `metrics_ipc_name` socket instead.
 - **Multi-rank KV events.** One DP rank per worker. The per-rank port offset is
   implemented, but nothing drives `dp_size > 1`.
-- **Per-tenant cache isolation (`cache_salt`)** and **gateway mode
-  (`--gateway-workers`)**: see Known gaps above.
+- **Gateway mode (`--gateway-workers`)**: see Known gaps above.
 - Multimodal, embedding/rerank, diffusion, LoRA, and weight updates — these
   raise a clear `NotImplementedError` rather than pretending.
