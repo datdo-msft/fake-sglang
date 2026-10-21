@@ -309,10 +309,21 @@ The split is the point: `src/sglang/` translates, `src/fakeengine/` behaves.
 Swapping in real SGLang, or driving the simulator from a different facade, only
 touches one side.
 
+## Memory per worker
+
+A worker's footprint is ~93 MB. Most of what's left is the Python, Dynamo
+runtime, and tokenizer imports. Without intervention it would be ~280 MB:
+Dynamo's SGLang component imports `torch` at module scope, and `transformers`
+pulls in its torch modeling stack once it sees torch installed. The engine
+never touches a tensor, so `src/sglang/_no_torch.py` (active only under
+`python -m dynamo.sglang`) tells transformers torch is absent and gives
+Dynamo a stub `torch`. Any real call into the stub raises an error. Set
+`FAKE_SGLANG_REAL_TORCH=1` to load the real torch instead.
+
 ## Tests
 
 ```bash
-pytest tests/                                                    # 82 tests
+pytest tests/                                                    # 85 tests
 pytest ../dynamo/components/src/dynamo/sglang/tests -m unit      # 1006 pass, 7 fail (below)
 ```
 

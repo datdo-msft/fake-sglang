@@ -8,8 +8,12 @@ importing it by accident is not, hence the marker below and the startup banner
 in :mod:`fakeengine.config`.
 """
 
-from sglang.srt.entrypoints.engine import Engine
-from sglang.srt.server_args import ServerArgs
+from sglang import _no_torch
+
+_no_torch.install()                     # before anything can import torch
+
+from sglang.srt.entrypoints.engine import Engine  # noqa: E402
+from sglang.srt.server_args import ServerArgs  # noqa: E402
 
 __version__ = "0.5.19"          # the SGLang release whose API this mirrors
 __is_fake_sglang__ = True
